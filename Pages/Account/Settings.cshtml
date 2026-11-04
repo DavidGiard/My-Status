@@ -3,6 +3,7 @@
 @{ ViewData["Title"] = "Settings"; }
 <section class="card account">
     <h1>Your settings</h1>
+    <p><a asp-page="/Account/ChangePassword">Change password</a></p>
     <p class="muted">Your time zone determines today's activity and completion date defaults. Stored dates are calendar dates and do not shift when you change time zone.</p>
     <form method="post">
         <div asp-validation-summary="All" role="alert"></div>

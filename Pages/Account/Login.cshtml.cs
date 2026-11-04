@@ -1,28 +1,25 @@
-using Microsoft.AspNetCore.Authentication;
+using System.ComponentModel.DataAnnotations;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.RazorPages;
 using Microsoft.AspNetCore.RateLimiting;
-using MyStatus.Services;
+using MyStatus.Domain;
 
 namespace MyStatus.Pages.Account;
 
 [EnableRateLimiting("auth")]
-public sealed class LoginModel(MicrosoftAccountOptions microsoft) : PageModel
+public sealed class LoginModel(SignInManager<ApplicationUser> signIn) : PageModel
 {
-    public bool Configured => microsoft.IsConfigured;
-    [BindProperty(SupportsGet = true)] public bool SignInFailed { get; set; }
+    [BindProperty, Required, StringLength(100)] public string Username { get; set; } = "";
+    [BindProperty, Required, StringLength(256), DataType(DataType.Password)] public string Password { get; set; } = "";
     [BindProperty(SupportsGet = true)] public string? ReturnUrl { get; set; }
     public void OnGet() { }
-    public IActionResult OnPost()
+    public async Task<IActionResult> OnPostAsync()
     {
         if (!ModelState.IsValid) return Page();
-        if (!Configured)
-        {
-            Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
-            ModelState.AddModelError("", "Microsoft sign-in is not configured. Follow the setup instructions in README.md.");
-            return Page();
-        }
-        return Challenge(new AuthenticationProperties { RedirectUri = Url.IsLocalUrl(ReturnUrl) ? ReturnUrl : "/" },
-            MicrosoftAccountOptions.Scheme);
+        var result = await signIn.PasswordSignInAsync(Username.Trim(), Password, isPersistent: false, lockoutOnFailure: true);
+        if (result.Succeeded) return LocalRedirect(Url.IsLocalUrl(ReturnUrl) ? ReturnUrl! : "/");
+        ModelState.AddModelError("", "Sign-in failed. Check your username and password or try again later.");
+        return Page();
     }
 }

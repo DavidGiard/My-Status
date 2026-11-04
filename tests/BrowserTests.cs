@@ -33,10 +33,9 @@ public sealed class BrowserTests
         page.PageError += (_, error) => errors.Add(error);
         await page.GotoAsync("/");
         await Expect(page.GetByRole(AriaRole.Heading, new() { Name = "Welcome back" })).ToBeVisibleAsync();
-        await page.RouteAsync("https://login.microsoftonline.com/**", route =>
-            route.FulfillAsync(new() { Status = 302, Headers = new Dictionary<string, string>
-                { ["Location"] = factory.Provider.Callback(route.Request.Url) } }));
-        await page.GetByRole(AriaRole.Button, new() { Name = "Sign in with Microsoft", Exact = true }).ClickAsync();
+        await page.GetByLabel("Username", new() { Exact = true }).FillAsync(AppFactory.Username);
+        await page.GetByLabel("Password", new() { Exact = true }).FillAsync(AppFactory.Password);
+        await page.GetByRole(AriaRole.Button, new() { Name = "Sign in", Exact = true }).ClickAsync();
         try
         {
             await Expect(page.GetByRole(AriaRole.Heading, new() { Name = "Activities", Exact = true })).ToBeVisibleAsync(new() { Timeout = 15000 });
@@ -125,9 +124,20 @@ public sealed class BrowserTests
         await Expect(page.GetByText("This permanently deletes this activity and its tag assignments. This cannot be undone.")).ToBeVisibleAsync();
         await page.GetByRole(AriaRole.Button, new() { Name = "Confirm permanent deletion" }).ClickAsync();
         await Expect(page.GetByRole(AriaRole.Heading, new() { Name = "No activities to show" })).ToBeVisibleAsync();
+        await page.GotoAsync("/Account/Settings");
+        await page.GetByRole(AriaRole.Link, new() { Name = "Change password", Exact = true }).ClickAsync();
+        await page.GetByLabel("Current password", new() { Exact = true }).FillAsync(AppFactory.Password);
+        await page.GetByLabel("New password", new() { Exact = true }).FillAsync("Browser-changed-password-4!");
+        await page.GetByLabel("Confirm password", new() { Exact = true }).FillAsync("Browser-changed-password-4!");
+        await page.GetByRole(AriaRole.Button, new() { Name = "Change password", Exact = true }).ClickAsync();
+        await Expect(page.GetByText("Password changed.", new() { Exact = true })).ToBeVisibleAsync();
         Assert.Empty(errors);
         await page.GetByRole(AriaRole.Button, new() { Name = "Sign out", Exact = true }).ClickAsync();
         await page.GotoAsync("/Report");
         await Expect(page.GetByRole(AriaRole.Heading, new() { Name = "Welcome back" })).ToBeVisibleAsync();
+        await page.GetByLabel("Username", new() { Exact = true }).FillAsync(AppFactory.Username);
+        await page.GetByLabel("Password", new() { Exact = true }).FillAsync("Browser-changed-password-4!");
+        await page.GetByRole(AriaRole.Button, new() { Name = "Sign in", Exact = true }).ClickAsync();
+        await Expect(page.Locator(".page-heading").GetByRole(AriaRole.Heading, new() { Name = "Status report", Exact = true })).ToBeVisibleAsync();
     }
 }

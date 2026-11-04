@@ -4,50 +4,35 @@
 
 Development defaults to SQLite. Set `Database__Provider=SqlServer` plus a separate development
 connection string if testing SQL Server manually. Outside `Development`, the app always uses
-SQL Server and fails startup if the database connection, canonical HTTPS URL, Microsoft sign-in
-configuration, or Key Vault key identifier is missing.
-
-`appsettings.Production.example.json` contains **placeholders only**, not a deployable environment.
-Supply real values through App Service configuration/Key Vault references. Configure:
+SQL Server and requires a connection string, canonical HTTPS URL and Key Vault key identifier.
+`appsettings.Production.example.json` contains placeholders only, not a deployable environment.
 
 | Key | Purpose |
 |---|---|
-| `ConnectionStrings__DefaultConnection` | Azure SQL connection using managed identity; TLS enabled and certificate validation on |
+| `ConnectionStrings__DefaultConnection` | Azure SQL connection using managed identity, TLS and certificate validation |
 | `App__PublicUrl` | Canonical HTTPS origin, with no path/query |
-| `Microsoft__TenantId` | Single organizational directory GUID |
-| `Microsoft__ClientId` | Application registration's client GUID |
-| `Microsoft__ClientSecret` | Confidential web application's credential; inject through a Key Vault reference |
-| `Microsoft__OwnerObjectId` | Authorized user's object GUID in that tenant, never an email or app object ID |
-| `DataProtection__KeyIdentifier` | Versionless Key Vault RSA key URI, for wrapping persisted Data Protection keys |
+| `DataProtection__KeyIdentifier` | Versionless Key Vault RSA key URI protecting persisted Data Protection keys |
 | `AllowedHosts` | Exact approved application hostname(s), separated by semicolons |
 
-Use the App Service managed identity for Azure SQL and Key Vault.
-The code uses `DefaultAzureCredential`; developer credentials are for local testing only.
-Do not grant subscription-wide roles or database owner to the running app.
-
-App Service must enforce HTTPS-only and use an approved, trusted reverse-proxy/forwarded-header
-configuration. Validate that the application observes HTTPS, emits secure cookies, and creates
-no redirect loops. Do not blanket-trust forwarded headers from arbitrary clients. If adding another
-proxy, explicitly configure trusted networks/proxies before enabling forwarded headers.
-Cookies are `__Host-` scoped, Secure, HttpOnly, SameSite=Lax, with an eight-hour sliding lifetime.
-Identity security stamps are revalidated within five minutes. Every authenticated request also checks
-the configured tenant/object binding and its local login mapping. Legacy password cookies are rejected.
+Use managed identity for Azure SQL and Key Vault. `DefaultAzureCredential` developer credentials
+are only for local testing. Do not grant the runtime subscription-wide roles or database owner.
+App Service must enforce HTTPS-only and use approved trusted-proxy/forwarded-header configuration.
+Verify HTTPS is observed correctly and there are no redirect loops. Never blanket-trust forwarded
+headers. Cookies are `__Host-` scoped, Secure, HttpOnly, SameSite=Lax, with an eight-hour sliding lifetime.
 
 ## Controlled schema migration
 
-Never use `EnsureCreated`, drop/recreate, or implicit startup migrations on a deployed database.
-Only tests create/discard databases. Use a separate deployment/migration identity with DDL permissions;
-the runtime account needs only application/Identity/DataProtection table DML.
+Never use `EnsureCreated`, drop/recreate, or implicit startup migrations on deployed databases.
+Only tests create/discard databases. Use a separate deployment identity with DDL permissions;
+runtime needs only application/Identity/DataProtection table DML.
 
 The repository includes distinct migrations/snapshots for `AppDbContext` (SQL Server) and
-`LocalDbContext` (SQLite). Design-time factories deliberately use local design-only connections;
-production migration commands must use the explicitly configured runtime environment or a
-reviewed SQL script. Do not run `dotnet ef database update` assuming its design factory targets production.
+`LocalDbContext` (SQLite). Design-time factories use local design-only connections. Do not assume
+`dotnet ef database update` uses production. For local development: `dotnet run -- --migrate`.
 
-For local development: `dotnet run -- --migrate`.
-For an approved production rollout:
+For approved production rollout:
 
-1. Take/confirm a recoverable backup, review the schema diff and data impact, and stop conflicting writes if required.
+1. Confirm a recoverable backup; review schema/data impact and stop conflicting writes if required.
 2. Generate an idempotent SQL Server script in a private deployment workspace:
 
    ```powershell
@@ -55,88 +40,69 @@ For an approved production rollout:
    dotnet ef migrations script --idempotent --context AppDbContext --output <private-script-path>
    ```
 
-3. Review and apply it against the explicitly selected database with the deployment identity, or run the published application with `--migrate` using production configuration and a DDL-capable identity.
-4. Start the web app with its restricted runtime identity; verify authentication, existing activity data, reports, and key access.
-5. Prefer a reviewed roll-forward fix. Any rollback script or database restore requires its own data-loss assessment; never automatically run migration `Down` on production.
+3. Review/apply it to the explicitly selected database with the deployment identity, or run the published application with `--migrate` using production configuration and a DDL-capable identity.
+4. Start with restricted runtime identity; verify authentication, existing activity data, reports and key access.
+5. Prefer reviewed roll-forward fixes. Database restore or rollback requires a separate data-loss assessment; never automatically run migration `Down` on production.
 
-SQL Server and SQLite hierarchy triggers are deliberately authored in the initial migrations.
-When changing tables with future migrations, retain/recreate these triggers. In particular,
-SQLite table rebuilds can discard custom triggers. Run direct-write hierarchy tests after every
-schema change, and test upgrades against a copy with existing activities and tag assignments.
+Preserve the hierarchy triggers authored in both providers' initial migrations. SQLite table rebuilds
+can discard custom triggers. Run direct-write hierarchy tests and upgrade tests with existing data.
+Switching from Microsoft to local passwords needs no schema change.
 
-## One-account administration
+## Single-account administration and recovery
 
-Run the published application with `--provision` in an administrator-controlled interactive terminal
-after migration, using the target configuration and an identity allowed to write Identity tables.
-Configure and independently verify the intended Entra tenant and user object IDs first; see README
-for registration and user-secrets setup. Provisioning creates no password. The procedure runs in a
-serializable database transaction and refuses when any user exists. There is no web registration/bootstrap route.
-Do not manually insert extra users into Identity tables.
+Run `--provision` after migrations in an administrator-controlled terminal. It prompts for username
+and hidden password and refuses if any user already exists. There is no public registration/bootstrap
+route, default account or committed password. Identity salts/hashes passwords and requires 12+
+characters, upper/lowercase, digit and symbol. Keep credentials in a password manager.
 
-To upgrade an existing password-based account, stop writes, take a recoverable database/key backup,
-verify the configured tenant/object pair, and run `--link-microsoft` interactively. Confirm with **LINK**.
-It preserves the sole local owner ID and all existing data, removes its password and rotates its
-security stamp in the same transaction. Existing time-zone settings remain unchanged. No email matching,
-automatic first-login provisioning, or replacement of an existing Microsoft binding is allowed.
-If the identity must change later, revoke sessions and use a separately reviewed administrative
-recovery; never change the allowlist alone and expect it to transfer data.
+To replace credentials on the sole existing account, stop writes and back up the database/keys.
+Run `--set-password`, confirm **REPLACE**, then enter username and new password. It preserves the
+local owner ID, activities, categories, tags and time zone; removes external login mappings; resets
+lockout; and rotates the security stamp in a serializable transaction. Invalid input rolls back.
+More than one existing user is an error requiring administrative review, never automatic deletion.
+The CLI also accepts trusted redirected standard input: confirmation when replacing, username,
+password, one per line. Never put passwords in arguments, environment settings, repository or logs.
 
-Time zone defaults to UTC during provisioning and is editable in Settings. Use a zone available
-on the target host (IANA zone IDs are preferred for portability). Dates are calendar dates:
-changing the time zone affects future defaults, not previously saved dates.
+This is also the lost-password recovery procedure. No email sender, ACS dependency, Entra registration,
+Microsoft SSO or self-service forgot-password flow remains. Old Entra registrations/credentials, if
+previously created, can be removed separately after confirming no other application uses them.
+No tenant-side objects are automatically deleted by this application.
 
-## Microsoft identity and sign-in operations
+Users can change a known password under **Settings > Change password**, supplying their current
+password. The current session is refreshed; other sessions are revoked when their security stamp
+is revalidated (within five minutes). Administrative reset also revokes sessions within five minutes.
+Sign out deletes this application's session cookie.
 
-Register the production Web redirect URI as `https://<approved-host>/signin-oidc`. Validate host and
-HTTPS handling through the approved proxy: the OIDC callback origin is based on the request origin,
-so `AllowedHosts`, HTTPS-only and trusted forwarded-header handling must agree with the registration.
-Use the single-tenant registration; no `common`/`organizations` multi-tenant authority.
-The app validates issuer, signature, audience, lifetime, state/nonce/correlation, then authorizes the
-immutable tenant/object pair and requires its pre-existing local binding. Email/display name are
-never authorization keys. Code flow uses PKCE; tokens are not stored in the application cookie.
+Five failed password attempts lock the account for 15 minutes. Generic login errors do not disclose
+whether a username exists or is locked. Login/password-change requests are limited to eight per
+source IP per minute per endpoint policy, including GETs; a 429 means wait. Limiter state is process-local: use one
+instance initially, review edge/distributed limits and trusted client-IP handling before scaling.
+Restrict administrative shell and DB access; anyone with those permissions can replace credentials.
 
-Microsoft manages MFA, conditional access, password policy and recovery. No local password/reset
-routes or email provider remain. App **Sign out** ends only this app's session, not the user's other
-Microsoft sessions. A later sign-in presents account selection but may reuse Microsoft SSO.
-Rate limiting applies to the login page (eight requests per source IP per minute, including GETs).
-A 429 response means wait before retrying.
-Rate limiter state is process-local; use one app instance initially. Review a distributed/edge
-limiter and trusted proxy client-IP handling before scaling out.
+Do not enable request-body logging, EF sensitive-data logging or credential-bearing telemetry.
+Restrict operational logs and alert on repeated authentication failures/lockouts and HTTP errors.
+No passwords should appear in access logs. Public hosting requires a reviewed brute-force and
+account-recovery procedure; local-password authentication does not provide MFA.
 
-Sign-in failures emit warning **1101 / MicrosoftSignInFailure**, with only the failure type, and show
-a generic error. Alert on repeated failures. Do not enable identity-library PII logging, request-body/
-query-string logging or EF sensitive-data logging. Redact OIDC codes/state from proxy/access logs
-and telemetry; `Referrer-Policy: no-referrer` also limits leakage. Framework logs can include sanitized
-protocol diagnostics, so restrict operational log access and retention.
-
-Keep the client secret in Key Vault references, track expiry, and rotate before it expires. Verify
-the new credential using a fresh sign-in before deleting the old credential. Test organization consent,
-MFA/conditional access and actual owner sign-in before go-live. Test suites use a synthetic signed-token
-endpoint through real OIDC middleware; they do not prove live tenant registration or consent.
-An administrator can revoke this app's sessions by removing its local external-login mapping
-(all requests recheck it), or rotating the user's Identity security stamp (within five minutes).
-Entra account disablement/revocation is checked on fresh Microsoft sign-in, not continuously on
-every local cookie request; use explicit local revocation when immediate app access removal is needed.
+Time zone defaults to UTC for new accounts and is editable in Settings. Prefer portable IANA IDs.
+Calendar dates already stored do not change when the time zone changes.
 
 ## Encryption keys and backups
 
-Data Protection keys persist in the database with a stable application discriminator `MyStatus`.
-Production wraps them with the configured Key Vault key. The app identity needs key get/wrap/unwrap
-permissions, not key management. Use a **versionless** key URI for rotation, retain old key versions
-as long as any persisted Data Protection key may need them, enable Key Vault soft-delete/purge
-protection, and monitor key expiration/access failures.
+Data Protection keys persist in the DB with stable discriminator `MyStatus`. Production wraps them
+with a Key Vault key. Grant get/wrap/unwrap, not key management. Use a versionless key URI, retain
+old key versions, enable soft-delete/purge protection and monitor expiry/access failures.
 
-Do not change the discriminator or delete key rows during deployment. Keep the database and
-wrapping-key access recoverable together. Loss of either invalidates cookies and in-flight sign-ins.
-Windows development DPAPI keys cannot be moved to another user/machine; start a new isolated
-development database if that identity is intentionally replaced.
+Do not change the discriminator or delete key rows during deployment. Keep DB and wrapping-key
+access recoverable together. Loss invalidates cookies. Windows DPAPI keys cannot move between
+users/machines. Do not recreate the real data DB just to resolve key access; review recovery first.
 
-Azure SQL point-in-time restore retention and recovery objectives must be explicitly selected
-and tested. Perform a restore drill into a separate protected database, verify owner data and
-key decryption, then dispose of the restore copy under the approved retention policy.
-Backups/database exports and logs may contain private activity data and never belong in the
-public repository. For SQLite, stop the app before an offline copy, or use SQLite's backup API;
-do not copy only a live `.db` while ignoring WAL state.
+Select Azure SQL point-in-time retention and recovery objectives explicitly. Restore into a separate
+protected DB to verify owner data/key decryption, then dispose under approved retention policy.
+Backups, exports and logs contain private data and never belong in the public repository.
+For SQLite, stop the app before an offline backup or use SQLite's backup API; do not copy only
+the `.db` while ignoring live WAL state. Protect the backup and any credential handoff file with
+OS permissions; delete a plaintext credential handoff after importing into a password manager.
 
-The app intentionally does not store a report history or reset inclusion flags. Reports can overlap.
-Use browser Print / Save as PDF to retain a manager-ready snapshot outside the repository.
+The app does not store report history or reset inclusion flags. Reports can overlap.
+Use browser Print / Save as PDF for snapshots outside the repository.
