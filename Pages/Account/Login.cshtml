@@ -3,14 +3,15 @@
 @{ ViewData["Title"] = "Sign in"; }
 <section class="card account">
     <p class="eyebrow">PRIVATE WORKSPACE</p><h1>Welcome back</h1>
-    <p class="muted">Sign in to organize your activities and prepare your next status report.</p>
+    <p class="muted">Use your work or school Microsoft account. Access is restricted to the configured owner.</p>
+    @if (Model.SignInFailed)
+    { <p class="notice" role="alert">Microsoft sign-in could not be completed. Use the authorized account or contact the operator to check the app registration and account link.</p> }
+    @if (!Model.Configured)
+    { <p class="notice" role="status">Microsoft sign-in needs setup. Configure the Entra app registration and owner identity using the instructions in README.md.</p> }
     <form method="post">
         <div asp-validation-summary="All" role="alert"></div>
         <input type="hidden" asp-for="ReturnUrl" />
-        <label asp-for="Email"></label><input asp-for="Email" autocomplete="username" required />
-        <label asp-for="Password"></label><input asp-for="Password" autocomplete="current-password" required />
-        <button type="submit">Sign in</button>
+        <button type="submit" disabled="@(!Model.Configured)">Sign in with Microsoft</button>
     </form>
-    <a asp-page="/Account/ForgotPassword">Forgot your password?</a>
-    <p class="muted">This is a private, single-account application. Public registration is disabled.</p>
+    <p class="muted">Your password and MFA are managed by Microsoft, not this application. Public registration and local password sign-in are disabled.</p>
 </section>

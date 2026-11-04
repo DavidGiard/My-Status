@@ -33,10 +33,18 @@ public sealed class BrowserTests
         page.PageError += (_, error) => errors.Add(error);
         await page.GotoAsync("/");
         await Expect(page.GetByRole(AriaRole.Heading, new() { Name = "Welcome back" })).ToBeVisibleAsync();
-        await page.GetByLabel("Email", new() { Exact = true }).FillAsync(AppFactory.Email);
-        await page.GetByLabel("Password", new() { Exact = true }).FillAsync(AppFactory.Password);
-        await page.GetByRole(AriaRole.Button, new() { Name = "Sign in", Exact = true }).ClickAsync();
-        await Expect(page.GetByRole(AriaRole.Heading, new() { Name = "Activities", Exact = true })).ToBeVisibleAsync();
+        await page.RouteAsync("https://login.microsoftonline.com/**", route =>
+            route.FulfillAsync(new() { Status = 302, Headers = new Dictionary<string, string>
+                { ["Location"] = factory.Provider.Callback(route.Request.Url) } }));
+        await page.GetByRole(AriaRole.Button, new() { Name = "Sign in with Microsoft", Exact = true }).ClickAsync();
+        try
+        {
+            await Expect(page.GetByRole(AriaRole.Heading, new() { Name = "Activities", Exact = true })).ToBeVisibleAsync(new() { Timeout = 15000 });
+        }
+        catch (PlaywrightException ex)
+        {
+            throw new InvalidOperationException($"Test sign-in ended at {new Uri(page.Url).GetLeftPart(UriPartial.Path)}: {await page.Locator("body").InnerTextAsync()}", ex);
+        }
         await page.GetByRole(AriaRole.Link, new() { Name = "Categories", Exact = true }).ClickAsync();
         await page.GetByLabel("Name", new() { Exact = true }).FillAsync("Projects");
         await page.GetByRole(AriaRole.Button, new() { Name = "Save category", Exact = true }).ClickAsync();

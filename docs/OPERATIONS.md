@@ -4,7 +4,7 @@
 
 Development defaults to SQLite. Set `Database__Provider=SqlServer` plus a separate development
 connection string if testing SQL Server manually. Outside `Development`, the app always uses
-SQL Server and fails startup if the database connection, canonical HTTPS URL, email sender
+SQL Server and fails startup if the database connection, canonical HTTPS URL, Microsoft sign-in
 configuration, or Key Vault key identifier is missing.
 
 `appsettings.Production.example.json` contains **placeholders only**, not a deployable environment.
@@ -13,13 +13,15 @@ Supply real values through App Service configuration/Key Vault references. Confi
 | Key | Purpose |
 |---|---|
 | `ConnectionStrings__DefaultConnection` | Azure SQL connection using managed identity; TLS enabled and certificate validation on |
-| `App__PublicUrl` | Canonical HTTPS origin, with no path/query, used for reset links; never derived from Host headers |
-| `Email__Endpoint` | Azure Communication Services HTTPS resource endpoint |
-| `Email__Sender` | Verified sender from the linked Email Communication Services domain |
+| `App__PublicUrl` | Canonical HTTPS origin, with no path/query |
+| `Microsoft__TenantId` | Single organizational directory GUID |
+| `Microsoft__ClientId` | Application registration's client GUID |
+| `Microsoft__ClientSecret` | Confidential web application's credential; inject through a Key Vault reference |
+| `Microsoft__OwnerObjectId` | Authorized user's object GUID in that tenant, never an email or app object ID |
 | `DataProtection__KeyIdentifier` | Versionless Key Vault RSA key URI, for wrapping persisted Data Protection keys |
 | `AllowedHosts` | Exact approved application hostname(s), separated by semicolons |
 
-Use the App Service managed identity for Azure SQL, Communication Services email, and Key Vault.
+Use the App Service managed identity for Azure SQL and Key Vault.
 The code uses `DefaultAzureCredential`; developer credentials are for local testing only.
 Do not grant subscription-wide roles or database owner to the running app.
 
@@ -28,7 +30,8 @@ configuration. Validate that the application observes HTTPS, emits secure cookie
 no redirect loops. Do not blanket-trust forwarded headers from arbitrary clients. If adding another
 proxy, explicitly configure trusted networks/proxies before enabling forwarded headers.
 Cookies are `__Host-` scoped, Secure, HttpOnly, SameSite=Lax, with an eight-hour sliding lifetime.
-Identity security stamps are revalidated within five minutes (including after a password reset).
+Identity security stamps are revalidated within five minutes. Every authenticated request also checks
+the configured tenant/object binding and its local login mapping. Legacy password cookies are rejected.
 
 ## Controlled schema migration
 
@@ -65,52 +68,55 @@ schema change, and test upgrades against a copy with existing activities and tag
 
 Run the published application with `--provision` in an administrator-controlled interactive terminal
 after migration, using the target configuration and an identity allowed to write Identity tables.
-Verify the email address independently; provisioning considers it confirmed.
-Passwords are hidden and must not be passed in command arguments, configuration, environment
-variables, repository files, or logs. The procedure runs in a serializable database transaction
-and refuses when any user exists. There is no web registration/bootstrap route.
+Configure and independently verify the intended Entra tenant and user object IDs first; see README
+for registration and user-secrets setup. Provisioning creates no password. The procedure runs in a
+serializable database transaction and refuses when any user exists. There is no web registration/bootstrap route.
 Do not manually insert extra users into Identity tables.
 
-Configure/verify email recovery **before** relying on the application in production.
-Before selecting ACS for a new deployment, review its
-[retirement/onboarding restrictions](https://learn.microsoft.com/azure/communication-services/acs-retirement-and-breaking-changes-guide):
-ACS Email retires September 30, 2028. Its Email FAQ currently allows new email onboarding, subject
-to change at any time, and recommends migration rather than new solutions; verified domains remain
-supported until retirement, with maintenance/security/critical-fix support. The October 23, 2026
-initial restriction concerns phone-number acquisition for retiring telephony/SMS, not a blanket
-email ban. Confirm current eligibility and obtain an explicit provider/lifecycle decision; the approved
-adapter remains implemented but is not a recommendation to create a new retiring service.
-For local password recovery, use Forgot password, then open the newest captured HTML file from
-the private `.local\mail` directory. Delete that specific capture after use. On a lost production
-password with delivery unavailable, restore the verified email service and use the standard reset
-flow. Do not clear hashes or insert a default password directly into SQL. If both key access and
-email recovery are lost, recover the original keys/identity configuration or perform a separately
-reviewed administrative recovery using ASP.NET Core Identity `UserManager`.
+To upgrade an existing password-based account, stop writes, take a recoverable database/key backup,
+verify the configured tenant/object pair, and run `--link-microsoft` interactively. Confirm with **LINK**.
+It preserves the sole local owner ID and all existing data, removes its password and rotates its
+security stamp in the same transaction. Existing time-zone settings remain unchanged. No email matching,
+automatic first-login provisioning, or replacement of an existing Microsoft binding is allowed.
+If the identity must change later, revoke sessions and use a separately reviewed administrative
+recovery; never change the allowlist alone and expect it to transfer data.
 
 Time zone defaults to UTC during provisioning and is editable in Settings. Use a zone available
 on the target host (IANA zone IDs are preferred for portability). Dates are calendar dates:
 changing the time zone affects future defaults, not previously saved dates.
 
-## Password reset and email operations
+## Microsoft identity and sign-in operations
 
-Reset links use Identity Data Protection tokens, last 30 minutes, and become invalid after
-a successful reset changes the security stamp. Neither known nor unknown addresses receive an
-account-existence signal in the response. Rate limiting applies to login/recovery/reset endpoints
-(eight requests per source IP per minute, including GETs); account lockout follows five failed
-password attempts for 15 minutes. A 429 response means wait before retrying.
+Register the production Web redirect URI as `https://<approved-host>/signin-oidc`. Validate host and
+HTTPS handling through the approved proxy: the OIDC callback origin is based on the request origin,
+so `AllowedHosts`, HTTPS-only and trusted forwarded-header handling must agree with the registration.
+Use the single-tenant registration; no `common`/`organizations` multi-tenant authority.
+The app validates issuer, signature, audience, lifetime, state/nonce/correlation, then authorizes the
+immutable tenant/object pair and requires its pre-existing local binding. Email/display name are
+never authorization keys. Code flow uses PKCE; tokens are not stored in the application cookie.
+
+Microsoft manages MFA, conditional access, password policy and recovery. No local password/reset
+routes or email provider remain. App **Sign out** ends only this app's session, not the user's other
+Microsoft sessions. A later sign-in presents account selection but may reuse Microsoft SSO.
+Rate limiting applies to the login page (eight requests per source IP per minute, including GETs).
+A 429 response means wait before retrying.
 Rate limiter state is process-local; use one app instance initially. Review a distributed/edge
 limiter and trusted proxy client-IP handling before scaling out.
 
-Email failures emit operational error **1001 / ResetEmailFailure**, without token, recipient, or
-provider exception payloads. Alert on that event and repeated HTTP failures. The generic recovery
-response does not claim delivery, and tells the user to contact the operator if mail does not arrive.
-Do not enable request-body/query-string logging, EF sensitive-data logging, or token-containing
-reset URL telemetry. Review App Service access logs and any telemetry provider for query redaction
-before enabling them; application `Referrer-Policy: no-referrer` prevents reset URL referral leakage.
+Sign-in failures emit warning **1101 / MicrosoftSignInFailure**, with only the failure type, and show
+a generic error. Alert on repeated failures. Do not enable identity-library PII logging, request-body/
+query-string logging or EF sensitive-data logging. Redact OIDC codes/state from proxy/access logs
+and telemetry; `Referrer-Policy: no-referrer` also limits leakage. Framework logs can include sanitized
+protocol diagnostics, so restrict operational log access and retention.
 
-ACS delivery acceptance does not prove inbox delivery. Verify sender linkage/domain DNS, SPF/DKIM,
-real inbox and spam-folder delivery, quotas, and bounce/suppression handling before go-live.
-Tests replace the email sender and never contact ACS.
+Keep the client secret in Key Vault references, track expiry, and rotate before it expires. Verify
+the new credential using a fresh sign-in before deleting the old credential. Test organization consent,
+MFA/conditional access and actual owner sign-in before go-live. Test suites use a synthetic signed-token
+endpoint through real OIDC middleware; they do not prove live tenant registration or consent.
+An administrator can revoke this app's sessions by removing its local external-login mapping
+(all requests recheck it), or rotating the user's Identity security stamp (within five minutes).
+Entra account disablement/revocation is checked on fresh Microsoft sign-in, not continuously on
+every local cookie request; use explicit local revocation when immediate app access removal is needed.
 
 ## Encryption keys and backups
 
@@ -121,7 +127,7 @@ as long as any persisted Data Protection key may need them, enable Key Vault sof
 protection, and monitor key expiration/access failures.
 
 Do not change the discriminator or delete key rows during deployment. Keep the database and
-wrapping-key access recoverable together. Loss of either invalidates cookies/reset links.
+wrapping-key access recoverable together. Loss of either invalidates cookies and in-flight sign-ins.
 Windows development DPAPI keys cannot be moved to another user/machine; start a new isolated
 development database if that identity is intentionally replaced.
 

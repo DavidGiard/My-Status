@@ -1,10 +1,11 @@
 using System.Net;
-using System.Text;
 using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc.Testing;
-using Microsoft.AspNetCore.WebUtilities;
+using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authentication.OpenIdConnect;
+using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -17,25 +18,12 @@ using Xunit;
 
 namespace MyStatus.Tests;
 
-public sealed class CaptureEmail : IResetEmail
-{
-    public string? Link { get; set; }
-    public bool Fail { get; set; }
-    public Task SendAsync(string address, string resetUrl)
-    {
-        if (Fail) throw new IOException("Synthetic delivery failure");
-        Link = resetUrl;
-        return Task.CompletedTask;
-    }
-}
-
 public sealed class AppFactory : WebApplicationFactory<Program>
 {
-    public const string Email = "test-user@example.invalid";
-    public const string Password = "Only-for-tests-4!Secure";
     private readonly string database;
     private readonly bool keepDatabase;
-    public CaptureEmail Mail { get; } = new();
+    public TestMicrosoftProvider Provider { get; } = new();
+    public MicrosoftAccountOptions Account { get; } = TestMicrosoftProvider.Account();
     private readonly bool browser;
     public AppFactory(bool browser = false, string? databasePath = null, bool keepDatabase = false)
     {
@@ -52,15 +40,13 @@ public sealed class AppFactory : WebApplicationFactory<Program>
         builder.ConfigureServices(services =>
         {
             Directory.CreateDirectory(Path.GetDirectoryName(database)!);
-            if (browser)
-            {
-                using var setup = new LocalDbContext(new DbContextOptionsBuilder<LocalDbContext>().UseSqlite($"Data Source={database}").Options);
+            using (var setup = new LocalDbContext(new DbContextOptionsBuilder<LocalDbContext>().UseSqlite($"Data Source={database}").Options))
                 setup.Database.Migrate();
-            }
             services.RemoveAll<DbContextOptions<LocalDbContext>>();
             services.AddDbContext<LocalDbContext>(o => o.UseSqlite($"Data Source={database}"));
-            services.RemoveAll<IResetEmail>();
-            services.AddSingleton<IResetEmail>(Mail);
+            services.RemoveAll<MicrosoftAccountOptions>();
+            services.AddSingleton(Account);
+            services.PostConfigure<OpenIdConnectOptions>(MicrosoftAccountOptions.Scheme, Provider.Configure);
         });
     }
     protected override IHost CreateHost(IHostBuilder builder)
@@ -79,15 +65,24 @@ public sealed class AppFactory : WebApplicationFactory<Program>
     {
         using var scope = Services.CreateScope();
         await scope.ServiceProvider.GetRequiredService<AppDbContext>().Database.MigrateAsync();
-        await scope.ServiceProvider.GetRequiredService<AccountProvisioner>().ProvisionAsync(Email, Password, "UTC");
+        await scope.ServiceProvider.GetRequiredService<AccountProvisioner>().ProvisionAsync("UTC");
     }
     public async Task<HttpClient> SignedInAsync()
     {
         await SeedAsync();
         var client = Client();
-        var response = await PostAsync(client, "/Account/Login", new() { ["Email"] = Email, ["Password"] = Password });
+        var response = await CompleteSignInAsync(client);
         Assert.Equal(HttpStatusCode.Redirect, response.StatusCode);
+        Assert.Equal("/", response.Headers.Location!.ToString());
         return client;
+    }
+    public async Task<HttpResponseMessage> CompleteSignInAsync(HttpClient client, string? returnUrl = null)
+    {
+        var fields = new Dictionary<string, string>();
+        if (returnUrl is not null) fields["ReturnUrl"] = returnUrl;
+        var challenge = await PostAsync(client, "/Account/Login", fields);
+        Assert.Equal(HttpStatusCode.Redirect, challenge.StatusCode);
+        return await client.GetAsync(Provider.Callback(challenge.Headers.Location!.ToString()));
     }
     public static string Field(string html, string name)
     {
@@ -111,6 +106,7 @@ public sealed class AppFactory : WebApplicationFactory<Program>
             foreach (var suffix in new[] { "", "-wal", "-shm" })
                 if (File.Exists(database + suffix)) File.Delete(database + suffix);
         }
+        if (disposing) Provider.Dispose();
     }
 }
 
@@ -177,7 +173,7 @@ public sealed class WebTests
         {
             await first.SeedAsync();
             using var client = first.Client();
-            var response = await AppFactory.PostAsync(client, "/Account/Login", new() { ["Email"] = AppFactory.Email, ["Password"] = AppFactory.Password });
+            var response = await first.CompleteSignInAsync(client);
             cookie = response.Headers.GetValues("Set-Cookie").Single(x => x.StartsWith("__Host-MyStatus=")).Split(';')[0];
             using var scope = first.Services.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
@@ -220,12 +216,12 @@ public sealed class WebTests
         using var client = await factory.SignedInAsync();
         using var scope = factory.Services.CreateScope();
         var provisioner = scope.ServiceProvider.GetRequiredService<AccountProvisioner>();
-        await Assert.ThrowsAsync<RuleException>(() => provisioner.ProvisionAsync("second@example.invalid", AppFactory.Password, "UTC"));
+        await Assert.ThrowsAsync<RuleException>(() => provisioner.ProvisionAsync("UTC"));
         Assert.Equal(1, await scope.ServiceProvider.GetRequiredService<AppDbContext>().Users.CountAsync());
         var response = await client.GetAsync("/Account/Register");
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsync("/Manage/tags", new FormUrlEncodedContent(new Dictionary<string, string> { ["Name"] = "Unsafe" }))).StatusCode);
-        var login = await AppFactory.PostAsync(client, "/Account/Login", new() { ["Email"] = AppFactory.Email, ["Password"] = AppFactory.Password, ["ReturnUrl"] = "https://example.invalid" });
+        var login = await factory.CompleteSignInAsync(client, "https://example.invalid");
         Assert.Equal("/", login.Headers.Location!.ToString());
         var cookie = login.Headers.GetValues("Set-Cookie").Single(x => x.StartsWith("__Host-MyStatus="));
         Assert.Contains("secure", cookie.ToLowerInvariant());
@@ -235,49 +231,161 @@ public sealed class WebTests
     }
 
     [Fact]
-    public async Task Password_reset_is_canonical_single_use_and_rejects_expired_tokens()
+    public async Task Local_password_and_recovery_routes_are_removed()
     {
-        using var factory = new AppFactory(); await factory.SeedAsync(); using var client = factory.Client();
-        var response = await AppFactory.PostAsync(client, "/Account/ForgotPassword", new() { ["Email"] = AppFactory.Email });
-        var known = await response.Content.ReadAsStringAsync();
-        Assert.Contains("If this address belongs to the account", known);
-        Assert.NotNull(factory.Mail.Link);
-        Assert.StartsWith("https://localhost:7143/Account/ResetPassword", factory.Mail.Link);
-        var query = QueryHelpers.ParseQuery(new Uri(factory.Mail.Link).Query);
-        var fields = new Dictionary<string, string>
-        {
-            ["UserId"] = query["userId"].ToString(), ["Code"] = query["code"].ToString(),
-            ["Password"] = "Changed-test-password-9!", ["ConfirmPassword"] = "Changed-test-password-9!"
-        };
-        response = await AppFactory.PostAsync(client, "/Account/ResetPassword", fields);
-        Assert.Contains("Your password has been reset", await response.Content.ReadAsStringAsync());
-        response = await AppFactory.PostAsync(client, "/Account/ResetPassword", fields);
-        Assert.Contains("The reset failed", await response.Content.ReadAsStringAsync());
+        using var factory = new AppFactory(); using var client = await factory.SignedInAsync();
+        foreach (var route in new[] { "/Account/ForgotPassword", "/Account/ResetPassword", "/Account/Register" })
+            Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync(route)).StatusCode);
+        var page = await client.GetStringAsync("/Account/Login");
+        Assert.Contains("Sign in with Microsoft", page);
+        Assert.DoesNotContain("type=\"password\"", page);
         using var scope = factory.Services.CreateScope();
         var manager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
-        var user = (await manager.FindByEmailAsync(AppFactory.Email))!;
-        var expired = await manager.GeneratePasswordResetTokenAsync(user);
-        var options = scope.ServiceProvider.GetRequiredService<IOptions<DataProtectionTokenProviderOptions>>().Value;
-        options.TokenLifespan = TimeSpan.FromTicks(-1);
-        Assert.False((await manager.ResetPasswordAsync(user, expired, AppFactory.Password)).Succeeded);
+        Assert.False(await manager.HasPasswordAsync((await manager.Users.SingleAsync())));
     }
 
     [Fact]
-    public async Task Reset_requests_do_not_enumerate_or_disclose_delivery_failures()
+    public async Task Missing_configuration_disables_sign_in_and_fails_closed()
+    {
+        using var factory = new AppFactory();
+        factory.Account.ClientSecret = "";
+        using var client = factory.Client();
+        var html = await client.GetStringAsync("/Account/Login");
+        Assert.Contains("Microsoft sign-in needs setup", html);
+        Assert.Contains("disabled=\"disabled\"", html);
+        var response = await AppFactory.PostAsync(client, "/Account/Login", new());
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Null(response.Headers.Location);
+        response = await client.GetAsync("/signin-oidc?code=not-real&state=not-real");
+        Assert.Equal("/Account/Login?signInFailed=true", response.Headers.Location!.ToString());
+    }
+
+    [Fact]
+    public async Task Valid_Microsoft_identity_cannot_automatically_create_or_claim_an_unlinked_account()
+    {
+        using var factory = new AppFactory(); using var client = factory.Client();
+        var response = await factory.CompleteSignInAsync(client);
+        Assert.Equal("/Account/Login?signInFailed=true", response.Headers.Location!.ToString());
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        Assert.Empty(await db.Users.ToListAsync());
+        db.Users.Add(new ApplicationUser { UserName = "same-email@example.invalid", Email = "same-email@example.invalid" });
+        await db.SaveChangesAsync();
+        response = await factory.CompleteSignInAsync(client);
+        Assert.Equal("/Account/Login?signInFailed=true", response.Headers.Location!.ToString());
+        Assert.Empty(await db.UserLogins.ToListAsync());
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Microsoft_callback_requires_original_state_and_correlation(bool tamperState)
     {
         using var factory = new AppFactory(); await factory.SeedAsync(); using var client = factory.Client();
-        factory.Mail.Fail = true;
-        var known = await AppFactory.PostAsync(client, "/Account/ForgotPassword", new() { ["Email"] = AppFactory.Email });
-        var unknown = await AppFactory.PostAsync(client, "/Account/ForgotPassword", new() { ["Email"] = "absent@example.invalid" });
-        Assert.Equal(HttpStatusCode.OK, known.StatusCode); Assert.Equal(known.StatusCode, unknown.StatusCode);
-        const string message = "If this address belongs to the account";
-        Assert.Contains(message, await known.Content.ReadAsStringAsync());
-        Assert.Contains(message, await unknown.Content.ReadAsStringAsync());
-        Assert.DoesNotContain("Synthetic", await known.Content.ReadAsStringAsync());
+        var challenge = await AppFactory.PostAsync(client, "/Account/Login", new());
+        var callback = factory.Provider.Callback(challenge.Headers.Location!.ToString());
+        using var noCookies = factory.Client();
+        var response = tamperState
+            ? await client.GetAsync(callback[..callback.IndexOf("&state=", StringComparison.Ordinal)] + "&state=invalid")
+            : await noCookies.GetAsync(callback);
+        Assert.Equal("/Account/Login?signInFailed=true", response.Headers.Location!.ToString());
+        Assert.Equal(HttpStatusCode.Redirect, (await client.GetAsync("/")).StatusCode);
     }
 
     [Fact]
-    public async Task Login_rate_limit_and_identity_lockout_are_active()
+    public async Task Explicit_link_preserves_existing_owner_data_and_removes_password()
+    {
+        using var factory = new AppFactory();
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var manager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
+        var user = new ApplicationUser { UserName = "legacy@example.invalid", Email = "legacy@example.invalid", TimeZoneId = "America/Chicago" };
+        Assert.True((await manager.CreateAsync(user, "Synthetic-legacy-password-9!")).Succeeded);
+        var stamp = user.SecurityStamp;
+        var taxonomy = scope.ServiceProvider.GetRequiredService<TaxonomyService>();
+        await taxonomy.SaveCategoryAsync(user.Id, null, "Existing work", null, default);
+        await taxonomy.SaveTagAsync(user.Id, null, "Keep tag", default);
+        await scope.ServiceProvider.GetRequiredService<ActivityService>().SaveAsync(user.Id, null, new ActivityInput
+        {
+            Date = new(2026, 1, 1), Description = "Keep my data", CategoryId = (await db.Categories.SingleAsync()).Id,
+            TagIds = [(await db.Tags.SingleAsync()).Id]
+        });
+        var provisioner = scope.ServiceProvider.GetRequiredService<AccountProvisioner>();
+        await Assert.ThrowsAsync<RuleException>(() => provisioner.ProvisionAsync("UTC"));
+        Assert.True(await manager.HasPasswordAsync(user));
+        Assert.Empty(await db.UserLogins.ToListAsync());
+        await provisioner.ProvisionAsync("UTC", linkExisting: true);
+        Assert.Equal(user.Id, (await db.Users.SingleAsync()).Id);
+        Assert.Equal("America/Chicago", user.TimeZoneId);
+        Assert.NotEqual(stamp, user.SecurityStamp);
+        Assert.False(await manager.HasPasswordAsync(user));
+        Assert.Equal(factory.Account.ProviderKey, (await manager.GetLoginsAsync(user)).Single().ProviderKey);
+        Assert.Equal("Keep my data", (await db.Activities.SingleAsync()).Description);
+        Assert.Single(await db.ActivityTags.ToListAsync());
+        await Assert.ThrowsAsync<RuleException>(() => provisioner.ProvisionAsync("UTC", linkExisting: true));
+        using var client = factory.Client();
+        var response = await factory.CompleteSignInAsync(client);
+        Assert.Equal("/", response.Headers.Location!.ToString());
+        Assert.Contains("Keep my data", await client.GetStringAsync("/"));
+    }
+
+    [Fact]
+    public async Task Refreshed_cookies_retain_binding_and_revoked_logins_and_legacy_cookies_are_rejected()
+    {
+        using var factory = new AppFactory(); using var client = await factory.SignedInAsync();
+        factory.Services.GetRequiredService<IOptions<SecurityStampValidatorOptions>>().Value.ValidationInterval = TimeSpan.Zero;
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/")).StatusCode);
+        using var scope = factory.Services.CreateScope();
+        var user = await scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>().Users.SingleAsync();
+        var legacyPrincipal = await scope.ServiceProvider.GetRequiredService<SignInManager<ApplicationUser>>().CreateUserPrincipalAsync(user);
+        var options = factory.Services.GetRequiredService<IOptionsMonitor<CookieAuthenticationOptions>>().Get(IdentityConstants.ApplicationScheme);
+        var legacyTicket = options.TicketDataFormat.Protect(new AuthenticationTicket(legacyPrincipal,
+            new AuthenticationProperties { IssuedUtc = DateTimeOffset.UtcNow, ExpiresUtc = DateTimeOffset.UtcNow.AddHours(1) },
+            IdentityConstants.ApplicationScheme));
+        using var oldClient = factory.Client();
+        oldClient.DefaultRequestHeaders.Add("Cookie", $"__Host-MyStatus={legacyTicket}");
+        Assert.Equal(HttpStatusCode.Redirect, (await oldClient.GetAsync("/")).StatusCode);
+        var manager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
+        Assert.True((await manager.RemoveLoginAsync(user, MicrosoftAccountOptions.Scheme, factory.Account.ProviderKey)).Succeeded);
+        Assert.Equal(HttpStatusCode.Redirect, (await client.GetAsync("/")).StatusCode);
+    }
+
+    [Theory]
+    [InlineData("owner")]
+    [InlineData("tenant")]
+    [InlineData("issuer")]
+    [InlineData("audience")]
+    [InlineData("expiry")]
+    [InlineData("nonce")]
+    [InlineData("signature")]
+    [InlineData("missing-object")]
+    public async Task Microsoft_callback_rejects_untrusted_tokens_and_unauthorized_identities(string invalid)
+    {
+        using var factory = new AppFactory(); await factory.SeedAsync(); using var client = factory.Client();
+        switch (invalid)
+        {
+            case "owner": factory.Provider.TokenObject = Guid.NewGuid().ToString(); break;
+            case "tenant": factory.Provider.TokenTenant = Guid.NewGuid().ToString(); break;
+            case "issuer": factory.Provider.TokenIssuer = "https://example.invalid"; break;
+            case "audience": factory.Provider.TokenAudience = Guid.NewGuid().ToString(); break;
+            case "expiry": factory.Provider.Expired = true; break;
+            case "nonce": factory.Provider.InvalidNonce = true; break;
+            case "signature": factory.Provider.InvalidSignature = true; break;
+            case "missing-object": factory.Provider.IncludeObject = false; break;
+        }
+        var response = await factory.CompleteSignInAsync(client);
+        Assert.Equal("/Account/Login?signInFailed=true", response.Headers.Location!.ToString());
+        Assert.False(response.Headers.TryGetValues("Set-Cookie", out var cookies)
+            && cookies.Any(x => x.StartsWith("__Host-MyStatus=") && !x.StartsWith("__Host-MyStatus=;")));
+        var denied = await client.GetAsync("/");
+        Assert.Equal(HttpStatusCode.Redirect, denied.StatusCode);
+        using var scope = factory.Services.CreateScope();
+        Assert.Equal(1, await scope.ServiceProvider.GetRequiredService<AppDbContext>().Users.CountAsync());
+    }
+
+    [Fact]
+    public async Task Login_rate_limit_is_active()
     {
         using var factory = new AppFactory(); await factory.SeedAsync(); using var client = factory.Client();
         var html = await client.GetStringAsync("/Account/Login");
@@ -285,12 +393,9 @@ public sealed class WebTests
         for (var i = 0; i < 5; i++)
         {
             var response = await client.PostAsync("/Account/Login", new FormUrlEncodedContent(new Dictionary<string, string>
-            { ["Email"] = AppFactory.Email, ["Password"] = "Wrong-test-password", ["__RequestVerificationToken"] = token }));
-            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            { ["__RequestVerificationToken"] = token }));
+            Assert.Equal(HttpStatusCode.Redirect, response.StatusCode);
         }
-        using var scope = factory.Services.CreateScope();
-        var user = await scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>().FindByEmailAsync(AppFactory.Email);
-        Assert.True(user!.LockoutEnd > DateTimeOffset.UtcNow);
         await client.GetAsync("/Account/Login"); await client.GetAsync("/Account/Login");
         Assert.Equal(HttpStatusCode.TooManyRequests, (await client.GetAsync("/Account/Login")).StatusCode);
     }

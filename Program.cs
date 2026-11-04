@@ -30,20 +30,28 @@ if (!development)
         || publicUrl.Scheme != "https" || publicUrl.AbsolutePath != "/" || !string.IsNullOrEmpty(publicUrl.Query)
         || !string.IsNullOrEmpty(publicUrl.Fragment) || !string.IsNullOrEmpty(publicUrl.UserInfo))
         throw new InvalidOperationException("App:PublicUrl must be the canonical HTTPS origin.");
-    if (string.IsNullOrWhiteSpace(builder.Configuration["Email:Endpoint"])
-        || string.IsNullOrWhiteSpace(builder.Configuration["Email:Sender"]))
-        throw new InvalidOperationException("Configure the verified Azure Communication Services Email sender.");
 }
-builder.Services.AddIdentity<ApplicationUser, IdentityRole>(options =>
-{
-    options.User.RequireUniqueEmail = true;
-    options.Password.RequiredLength = 12;
-    options.Lockout.MaxFailedAccessAttempts = 5;
-    options.Lockout.DefaultLockoutTimeSpan = TimeSpan.FromMinutes(15);
-    options.SignIn.RequireConfirmedEmail = true;
-}).AddEntityFrameworkStores<AppDbContext>().AddDefaultTokenProviders();
-builder.Services.Configure<DataProtectionTokenProviderOptions>(o => o.TokenLifespan = TimeSpan.FromMinutes(30));
+var microsoft = builder.Configuration.GetSection("Microsoft").Get<MicrosoftAccountOptions>() ?? new();
+builder.Services.AddSingleton(microsoft);
+if (!development && !args.Contains("--migrate") && !microsoft.IsConfigured)
+    throw new InvalidOperationException("Configure Microsoft:TenantId, ClientId, ClientSecret and OwnerObjectId before starting the web app.");
+builder.Services.AddIdentity<ApplicationUser, IdentityRole>().AddEntityFrameworkStores<AppDbContext>();
+builder.Services.AddAuthentication().AddOpenIdConnect(MicrosoftAccountOptions.Scheme, _ => { });
+builder.Services.AddOptions<Microsoft.AspNetCore.Authentication.OpenIdConnect.OpenIdConnectOptions>(MicrosoftAccountOptions.Scheme)
+    .Configure<MicrosoftAccountOptions>(MicrosoftAuthentication.Configure);
 builder.Services.Configure<SecurityStampValidatorOptions>(o => o.ValidationInterval = TimeSpan.FromMinutes(5));
+builder.Services.Configure<SecurityStampValidatorOptions>(o =>
+{
+    o.OnRefreshingPrincipal = context =>
+    {
+        // Identity rebuilds its principal periodically; retain the immutable Microsoft binding.
+        if (context.NewPrincipal?.Identity is System.Security.Claims.ClaimsIdentity identity && context.CurrentPrincipal is { } current)
+            foreach (var type in new[] { MicrosoftAuthentication.TenantClaim, MicrosoftAuthentication.ObjectClaim })
+                foreach (var claim in current.FindAll(type))
+                    identity.AddClaim(claim);
+        return Task.CompletedTask;
+    };
+});
 builder.Services.ConfigureApplicationCookie(o =>
 {
     o.Cookie.Name = "__Host-MyStatus";
@@ -54,6 +62,7 @@ builder.Services.ConfigureApplicationCookie(o =>
     o.AccessDeniedPath = "/Error";
     o.ExpireTimeSpan = TimeSpan.FromHours(8);
     o.SlidingExpiration = true;
+    o.Events.OnValidatePrincipal = MicrosoftAuthentication.ValidateCookieAsync;
 });
 var keys = builder.Services.AddDataProtection().SetApplicationName("MyStatus").PersistKeysToDbContext<AppDbContext>();
 if (!development)
@@ -71,8 +80,6 @@ builder.Services.AddRazorPages(o =>
 {
     o.Conventions.AuthorizeFolder("/");
     o.Conventions.AllowAnonymousToPage("/Account/Login");
-    o.Conventions.AllowAnonymousToPage("/Account/ForgotPassword");
-    o.Conventions.AllowAnonymousToPage("/Account/ResetPassword");
     o.Conventions.AllowAnonymousToPage("/Error");
 });
 builder.Services.AddRateLimiter(o =>
@@ -87,34 +94,36 @@ builder.Services.AddScoped<ActivityService>();
 builder.Services.AddScoped<TaxonomyService>();
 builder.Services.AddScoped<ReportService>();
 builder.Services.AddScoped<AccountProvisioner>();
-builder.Services.AddScoped<IResetEmail, ResetEmail>();
 var app = builder.Build();
 
-if (args.Contains("--migrate") || args.Contains("--provision"))
+if (args.Contains("--migrate") || args.Contains("--provision") || args.Contains("--link-microsoft"))
 {
     using var scope = app.Services.CreateScope();
     if (args.Contains("--migrate"))
         await scope.ServiceProvider.GetRequiredService<AppDbContext>().Database.MigrateAsync();
-    if (args.Contains("--provision"))
+    if (args.Contains("--provision") || args.Contains("--link-microsoft"))
     {
-        Console.Write("Account email: ");
-        var email = Console.ReadLine() ?? "";
-        Console.Write("Time zone ID (blank for UTC): ");
-        var zone = Console.ReadLine();
-        Console.Write("Password (hidden, at least 12 characters): ");
         if (Console.IsInputRedirected)
-            throw new InvalidOperationException("Provisioning requires an interactive terminal; do not pipe passwords.");
-        var password = new System.Text.StringBuilder();
-        ConsoleKeyInfo key;
-        while ((key = Console.ReadKey(true)).Key != ConsoleKey.Enter)
+            throw new InvalidOperationException("Account provisioning/linking requires an interactive administrator terminal.");
+        if (!microsoft.HasOwner)
+            throw new InvalidOperationException("Configure Microsoft:TenantId and Microsoft:OwnerObjectId first.");
+        var link = args.Contains("--link-microsoft");
+        if (link)
         {
-            if (key.Key == ConsoleKey.Backspace && password.Length > 0) password.Length--;
-            else if (!char.IsControl(key.KeyChar)) password.Append(key.KeyChar);
+            Console.WriteLine("This links the sole existing local account and ALL its data to the configured Microsoft tenant/object ID, removes its password and invalidates existing sessions.");
+            Console.WriteLine($"Target tenant: {microsoft.TenantId}; object: {microsoft.OwnerObjectId}");
+            Console.Write("Type LINK to authorize this account/data binding: ");
+            if (Console.ReadLine() != "LINK") throw new InvalidOperationException("Linking cancelled. No account data changed.");
         }
-        Console.WriteLine();
+        string? zone = null;
+        if (!link)
+        {
+            Console.Write("Time zone ID (blank for UTC): ");
+            zone = Console.ReadLine();
+        }
         await scope.ServiceProvider.GetRequiredService<AccountProvisioner>().ProvisionAsync(
-            email, password.ToString(), string.IsNullOrWhiteSpace(zone) ? "UTC" : zone);
-        Console.WriteLine("Single account provisioned. No web bootstrap endpoint is enabled.");
+            string.IsNullOrWhiteSpace(zone) ? "UTC" : zone, link);
+        Console.WriteLine("Microsoft account binding saved. No local password or public registration is enabled.");
     }
     return;
 }
@@ -124,7 +133,7 @@ if (!development) app.UseHsts();
 app.UseHttpsRedirection();
 app.Use(async (context, next) =>
 {
-    context.Response.Headers.ContentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
+    context.Response.Headers.ContentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; base-uri 'self'; form-action 'self' https://login.microsoftonline.com; frame-ancestors 'none'";
     context.Response.Headers.XContentTypeOptions = "nosniff";
     context.Response.Headers["Referrer-Policy"] = "no-referrer";
     context.Response.Headers.CacheControl = "no-store";
