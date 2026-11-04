@@ -1,0 +1,11 @@
+@page
+@model MyStatus.Pages.ErrorModel
+@{
+    ViewData["Title"] = "Something went wrong";
+}
+<section class="card">
+    <h1>We could not complete that request</h1>
+    <p>No success has been confirmed. Please return to the activity list and check the current state before retrying.</p>
+    <p>Reference: <code>@Model.Reference</code></p>
+    <a asp-page="/Index">Return to activities</a>
+</section>

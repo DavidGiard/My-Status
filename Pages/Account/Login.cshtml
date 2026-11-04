@@ -1,0 +1,16 @@
+@page
+@model MyStatus.Pages.Account.LoginModel
+@{ ViewData["Title"] = "Sign in"; }
+<section class="card account">
+    <p class="eyebrow">PRIVATE WORKSPACE</p><h1>Welcome back</h1>
+    <p class="muted">Sign in to organize your activities and prepare your next status report.</p>
+    <form method="post">
+        <div asp-validation-summary="All" role="alert"></div>
+        <input type="hidden" asp-for="ReturnUrl" />
+        <label asp-for="Email"></label><input asp-for="Email" autocomplete="username" required />
+        <label asp-for="Password"></label><input asp-for="Password" autocomplete="current-password" required />
+        <button type="submit">Sign in</button>
+    </form>
+    <a asp-page="/Account/ForgotPassword">Forgot your password?</a>
+    <p class="muted">This is a private, single-account application. Public registration is disabled.</p>
+</section>

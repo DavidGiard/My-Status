@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>@ViewData["Title"] - My Status</title>
+    <script src="~/js/theme.js"></script>
+    <link rel="stylesheet" href="~/css/site.css" asp-append-version="true" />
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="no-print">
+    <a class="brand" asp-page="/Index">My Status<span>Make your progress visible.</span></a>
+    @if (User.Identity?.IsAuthenticated == true)
+    {
+        <nav aria-label="Main navigation">
+            <a asp-page="/Index">Activities</a><a asp-page="/Taxonomy" asp-route-kind="categories">Categories</a>
+            <a asp-page="/Taxonomy" asp-route-kind="tags">Tags</a><a asp-page="/Report">Status report</a><a asp-page="/Account/Settings">Settings</a>
+            <form method="post" asp-page="/Account/Logout"><button class="secondary" type="submit">Sign out</button></form>
+        </nav>
+    }
+</header>
+<main id="main" tabindex="-1">
+    @if (TempData["Message"] is string message)
+    {
+        <div class="notice no-print" role="status">@message</div>
+    }
+    @RenderBody()
+</main>
+<footer class="no-print">My Status &middot; Your work, organized.</footer>
+<script src="~/js/site.js" asp-append-version="true" defer></script>
+@await RenderSectionAsync("Scripts", required: false)
+</body>
+</html>

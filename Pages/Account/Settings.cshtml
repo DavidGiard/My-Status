@@ -1,0 +1,17 @@
+@page
+@model MyStatus.Pages.Account.SettingsModel
+@{ ViewData["Title"] = "Settings"; }
+<section class="card account">
+    <h1>Your settings</h1>
+    <p class="muted">Your time zone determines today's activity and completion date defaults. Stored dates are calendar dates and do not shift when you change time zone.</p>
+    <form method="post">
+        <div asp-validation-summary="All" role="alert"></div>
+        <input type="hidden" asp-for="Stamp" />
+        <label asp-for="TimeZoneId"></label>
+        <select asp-for="TimeZoneId">
+            @foreach (var zone in TimeZoneInfo.GetSystemTimeZones())
+            { <option value="@zone.Id">@zone.DisplayName (@zone.Id)</option> }
+        </select>
+        <button type="submit">Save settings</button>
+    </form>
+</section>

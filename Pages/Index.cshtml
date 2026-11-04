@@ -1,0 +1,69 @@
+@page
+@model MyStatus.Pages.IndexModel
+@{ ViewData["Title"] = "Activities"; }
+<div class="page-heading">
+    <div><p class="eyebrow">YOUR WORKSPACE</p><h1>Activities</h1><p class="muted">Plan the work. Capture the progress.</p></div>
+    <a class="button" asp-page="/Activities/Edit">New activity</a>
+</div>
+<details class="card filters" open>
+    <summary>Search &amp; filters</summary>
+    <form method="get">
+        <div asp-validation-summary="All" role="alert"></div>
+        <div class="grid">
+            <div><label asp-for="Search">Search description</label><input asp-for="Search" type="search" maxlength="200" /></div>
+            <div><label asp-for="CategoryId">Category (includes children)</label>
+                <select asp-for="CategoryId"><option value="">All categories</option>
+                    @foreach (var category in Model.Categories.OrderBy(x => x.Path))
+                    { <option value="@category.Id">@category.Path</option> }
+                </select>
+            </div>
+            <div><label asp-for="Status"></label><select asp-for="Status"><option value="">All statuses</option>
+                @foreach (var status in Enum.GetValues<ActivityStatus>())
+                { <option value="@((int)status)">@status.Label()</option> }
+            </select></div>
+            <div><label asp-for="ReportFlag">Report inclusion</label><select asp-for="ReportFlag">
+                <option value="">Any</option><option value="true">Included</option><option value="false">Excluded</option>
+            </select></div>
+            <div><label asp-for="CompletionDates">Date field</label><select asp-for="CompletionDates">
+                <option value="false">Activity / planned date</option><option value="true">Completion date</option>
+            </select></div>
+            <div><label asp-for="From">From (inclusive)</label><input asp-for="From" type="date" /></div>
+            <div><label asp-for="To">To (inclusive)</label><input asp-for="To" type="date" /></div>
+        </div>
+        <fieldset><legend>Tags (matches any selected)</legend><div class="checks">
+            @foreach (var tag in Model.Tags)
+            { <label><input type="checkbox" name="TagIds" value="@tag.Id" checked="@Model.TagIds.Contains(tag.Id)" /> @tag.Name</label> }
+            @if (Model.Tags.Count == 0) { <span class="muted">No tags yet.</span> }
+        </div></fieldset>
+        <div class="actions"><button type="submit">Apply filters</button><a asp-page="/Index">Clear filters</a></div>
+    </form>
+</details>
+<p class="muted">@Model.Count matching activities &middot; Page @Model.PageNumber of @Model.Pages</p>
+@if (Model.Activities.Count == 0)
+{
+    <section class="card empty"><h2>No activities to show</h2><p>Create your first activity or adjust the filters.</p>
+        @if (Model.Categories.Count == 0) { <a asp-page="/Taxonomy" asp-route-kind="categories">Create a category first</a> }
+    </section>
+}
+else
+{
+    <div class="activity-list">
+    @foreach (var activity in Model.Activities)
+    {
+        <article class="card activity">
+            <div class="activity-top"><span class="badge">@activity.Status.Label()</span><span class="muted">@activity.Date.ToString("yyyy-MM-dd") &middot; @activity.Category.Path</span></div>
+            <h2><a asp-page="/Activities/Details" asp-route-id="@activity.Id">@activity.Description</a></h2>
+            <div class="activity-bottom"><span class="muted">@(activity.IncludeInReport ? "Included in reports" : "Excluded from reports")@(activity.CompletionDate is { } completed ? $" · Completed {completed:yyyy-MM-dd}" : "")</span>
+                <a asp-page="/Activities/Edit" asp-route-id="@activity.Id">Edit</a></div>
+            <div class="checks">
+            @foreach (var assignment in activity.ActivityTags.OrderBy(x => x.Tag.Name))
+            { <span class="tag">@assignment.Tag.Name</span> }
+            </div>
+        </article>
+    }
+    </div>
+}
+<nav class="pagination" aria-label="Activity pages">
+    @if (Model.PageNumber > 1) { <a href="@Model.PageUrl(Model.PageNumber - 1)">Previous</a> }
+    @if (Model.PageNumber < Model.Pages) { <a href="@Model.PageUrl(Model.PageNumber + 1)">Next</a> }
+</nav>

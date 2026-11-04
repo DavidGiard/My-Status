@@ -1,0 +1,23 @@
+@page "{id:int}"
+@model MyStatus.Pages.Activities.DetailsModel
+@{ ViewData["Title"] = "Activity details"; }
+<div class="page-heading"><h1>Activity details</h1><a asp-page="/Index">Back to activities</a></div>
+<article class="card">
+    <div asp-validation-summary="All" role="alert"></div>
+    <span class="badge">@Model.Activity.Status.Label()</span>
+    <h2 class="plain-text">@Model.Activity.Description</h2>
+    <dl><dt>Activity / planned date</dt><dd>@Model.Activity.Date.ToString("yyyy-MM-dd")</dd>
+        <dt>Category</dt><dd>@Model.Activity.Category.Path</dd>
+        <dt>Completion date</dt><dd>@(Model.Activity.CompletionDate?.ToString("yyyy-MM-dd") ?? "Not complete")</dd>
+        <dt>Report inclusion</dt><dd>@(Model.Activity.IncludeInReport ? "Included" : "Excluded")</dd>
+        <dt>Tags</dt><dd>@(Model.Activity.ActivityTags.Count == 0 ? "None" : string.Join(", ", Model.Activity.ActivityTags.Select(x => x.Tag.Name).Order()))</dd>
+    </dl>
+    <a class="button" asp-page="/Activities/Edit" asp-route-id="@Model.Activity.Id">Edit activity</a>
+    <details class="danger-zone"><summary>Delete activity</summary>
+        <p>This permanently deletes this activity and its tag assignments. This cannot be undone.</p>
+        <form method="post" asp-page-handler="Delete">
+            <input type="hidden" asp-for="Version" />
+            <button type="submit" class="danger">Confirm permanent deletion</button>
+        </form>
+    </details>
+</article>
