@@ -1,0 +1,63 @@
+@page "/Manage/{kind}"
+@model MyStatus.Pages.TaxonomyModel
+@{ ViewData["Title"] = Model.Title; }
+<div class="page-heading"><div><p class="eyebrow">ORGANIZE YOUR WORK</p><h1>@Model.Title</h1>
+    <p class="muted">@(Model.IsTag ? "Reusable labels for finding activities across categories." : "Two levels: categories and subcategories. Activities belong to exactly one.")</p></div></div>
+<section class="card">
+    <div asp-validation-summary="All" role="alert"></div>
+    @if (Model.DeleteId.HasValue)
+    {
+        <h2>Delete @Model.Name?</h2>
+        <p>@(Model.IsTag ? "This removes the tag from all activities, but does not delete any activities." : "Categories with activities or children cannot be deleted. Reassign or remove references first.")</p>
+        <form method="post" asp-page-handler="Delete">
+            <input type="hidden" asp-for="DeleteId" /><input type="hidden" asp-for="Version" /><input type="hidden" asp-for="Name" />
+            <div class="actions"><button type="submit" class="danger">Confirm deletion</button><a asp-page="/Taxonomy" asp-route-kind="@Model.Kind">Cancel</a></div>
+        </form>
+    }
+    else
+    {
+        <h2>@(Model.EditId.HasValue ? "Edit" : "Create") @(Model.IsTag ? "tag" : "category")</h2>
+        <form method="post" data-unsaved>
+            <input type="hidden" asp-for="EditId" /><input type="hidden" asp-for="Version" />
+            <div class="grid">
+                <div><label asp-for="Name"></label><input asp-for="Name" maxlength="100" required /></div>
+                @if (!Model.IsTag)
+                {
+                    <div><label asp-for="ParentId">Parent category</label><select asp-for="ParentId">
+                        <option value="">None (top-level category)</option>
+                        @foreach (var category in Model.Categories.Where(x => x.ParentId == null && x.Id != Model.EditId))
+                        { <option value="@category.Id">@category.Name</option> }
+                    </select></div>
+                }
+            </div>
+            <div class="actions"><button type="submit">Save @(Model.IsTag ? "tag" : "category")</button>
+                @if (Model.EditId.HasValue) { <a asp-page="/Taxonomy" asp-route-kind="@Model.Kind">Cancel / reload</a> }
+            </div>
+        </form>
+    }
+</section>
+<section class="card">
+    <h2>All @Model.Title.ToLowerInvariant()</h2>
+    @if (Model.IsTag)
+    {
+        @if (Model.Tags.Count == 0) { <p class="muted">No tags yet.</p> }
+        @foreach (var tag in Model.Tags)
+        {
+            <div class="manage-row"><span>@tag.Name</span><div class="actions">
+                <a asp-page="/Taxonomy" asp-route-kind="@Model.Kind" asp-route-editId="@tag.Id">Edit</a>
+                <a asp-page="/Taxonomy" asp-route-kind="@Model.Kind" asp-route-deleteId="@tag.Id">Delete</a>
+            </div></div>
+        }
+    }
+    else
+    {
+        @if (Model.Categories.Count == 0) { <p class="muted">Create a category to start adding activities.</p> }
+        @foreach (var category in Model.Categories.OrderBy(x => x.Path))
+        {
+            <div class="manage-row"><span>@category.Path</span><div class="actions">
+                <a asp-page="/Taxonomy" asp-route-kind="@Model.Kind" asp-route-editId="@category.Id">Edit</a>
+                <a asp-page="/Taxonomy" asp-route-kind="@Model.Kind" asp-route-deleteId="@category.Id">Delete</a>
+            </div></div>
+        }
+    }
+</section>

@@ -1,0 +1,39 @@
+@page
+@model MyStatus.Pages.ReportModel
+@{ ViewData["Title"] = "Status report"; }
+<div class="page-heading no-print"><div><p class="eyebrow">SHARE YOUR PROGRESS</p><h1>Status report</h1>
+    <p class="muted">Flagged, completed activities. Inclusive completion dates. No automatic emailing.</p></div></div>
+<section class="card no-print">
+    <form method="get">
+        <div asp-validation-summary="All" role="alert"></div>
+        <div class="grid">
+            <div><label asp-for="From">Completion date from (inclusive)</label><input asp-for="From" type="date" required /></div>
+            <div><label asp-for="To">Completion date to (inclusive)</label><input asp-for="To" type="date" required /></div>
+        </div>
+        <button type="submit">Generate report</button>
+    </form>
+</section>
+@if (Model.Report is { } report)
+{
+    <div class="actions no-print"><button type="button" data-copy>Copy for email</button><button type="button" class="secondary" data-print>Print / Save as PDF</button>
+        <span data-copy-status role="status" aria-live="polite"></span></div>
+    <article class="card report">
+        <h1>Status report</h1><p class="muted">@report.From.ToString("yyyy-MM-dd") to @report.To.ToString("yyyy-MM-dd")</p>
+        @if (report.Groups.Count == 0)
+        { <p>No completed activities selected for this period.</p> }
+        @foreach (var group in report.Groups)
+        {
+            <section class="report-group"><h2>@group.Category@(group.Subcategory is null ? "" : " / " + group.Subcategory)</h2>
+                <ul>
+                @foreach (var item in group.Items)
+                { <li><time>@item.Completed.ToString("yyyy-MM-dd")</time><span class="plain-text">@item.Description</span></li> }
+                </ul>
+            </section>
+        }
+    </article>
+    <details class="card no-print" data-copy-fallback>
+        <summary>Email-friendly text / manual copy</summary>
+        <label for="report-text">Select and copy this text if clipboard access is unavailable</label>
+        <textarea id="report-text" readonly rows="12">@report.ToPlainText()</textarea>
+    </details>
+}

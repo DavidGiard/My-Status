@@ -1,0 +1,38 @@
+@page "{id:int?}"
+@model MyStatus.Pages.Activities.EditModel
+@{ ViewData["Title"] = Model.ActivityId.HasValue ? "Edit activity" : "New activity"; }
+<div class="page-heading"><div><p class="eyebrow">ACTIVITIES</p><h1>@ViewData["Title"]</h1></div><a asp-page="/Index">Back to activities</a></div>
+<section class="card">
+    <form method="post" data-unsaved>
+        <div asp-validation-summary="All" role="alert"></div>
+        <input type="hidden" asp-for="Input.Version" />
+        <div class="grid">
+            <div><label asp-for="Input.Date"></label><input asp-for="Input.Date" type="date" required /></div>
+            <div><label asp-for="Input.CategoryId"></label>
+                <select asp-for="Input.CategoryId" required><option value="">Select a category</option>
+                    @foreach (var category in Model.Categories.OrderBy(x => x.Path))
+                    { <option value="@category.Id">@category.Path</option> }
+                </select>
+            </div>
+            <div><label asp-for="Input.Status"></label><select asp-for="Input.Status" data-status required>
+                @foreach (var status in Enum.GetValues<ActivityStatus>())
+                { <option value="@((int)status)">@status.Label()</option> }
+            </select></div>
+            <div><label asp-for="Input.CompletionDate"></label><input asp-for="Input.CompletionDate" type="date" data-completion />
+                <p class="hint">For Complete only. Leave blank to use today in your configured time zone; backdating is allowed.</p></div>
+        </div>
+        <label asp-for="Input.Description"></label><textarea asp-for="Input.Description" rows="5" maxlength="2000" required aria-describedby="description-help"></textarea>
+        <p id="description-help" class="hint">Plain text, up to 2,000 characters. Markup is displayed as text, not rendered.</p>
+        <label class="check"><input asp-for="Input.IncludeInReport" /> Include in status reports</label>
+        <fieldset><legend>Tags (optional)</legend><div class="checks">
+            @foreach (var tag in Model.Tags)
+            { <label><input type="checkbox" name="Input.TagIds" value="@tag.Id" checked="@Model.Input.TagIds.Contains(tag.Id)" /> @tag.Name</label> }
+            @if (Model.Tags.Count == 0) { <p class="muted">No tags yet. Add them from Tags after saving.</p> }
+        </div></fieldset>
+        @if (Model.Categories.Count == 0)
+        { <p class="notice">Create a category before saving an activity. <a asp-page="/Taxonomy" asp-route-kind="categories">Manage categories</a></p> }
+        <div class="actions"><button type="submit">Save activity</button><a asp-page="/Index">Cancel</a>
+            @if (Model.ActivityId.HasValue) { <a asp-page="/Activities/Edit" asp-route-id="@Model.ActivityId">Reload saved version</a> }
+        </div>
+    </form>
+</section>

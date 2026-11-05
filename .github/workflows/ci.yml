@@ -1,0 +1,29 @@
+name: Verify application
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: windows-latest
+    env:
+      MY_STATUS_SQLSERVER_TEST: "1"
+      MY_STATUS_BROWSER_TEST: "1"
+      PLAYWRIGHT_SKIP_BROWSER_GC: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: Build
+        run: dotnet build tests\MyStatus.Tests.csproj --configuration Release --warnaserror -p:RestoreLockedMode=true
+      - name: Prepare local HTTPS and browser
+        shell: pwsh
+        run: |
+          dotnet dev-certs https
+          pwsh tests\bin\Release\net10.0\playwright.ps1 install chromium
+      - name: Test
+        run: dotnet test tests\MyStatus.Tests.csproj --configuration Release --no-build --logger "trx;LogFileName=tests.trx" --results-directory .local\test-results
+      - name: Dependency audit
+        run: dotnet list MyStatus.csproj package --vulnerable --include-transitive
